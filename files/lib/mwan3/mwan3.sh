@@ -778,6 +778,7 @@ mwan3_set_policy()
 			--probability "$probability" \
 			-m comment --comment "$iface $weight $total_weight" \
 			-j MARK --set-xmark $(mwan3_id2mask id MMX_MASK)/$MMX_MASK
+		touch /tmp/mwan3_policy_has_online.$$
 	elif [ -n "$device" ]; then
 		# Gate "out" rule on at least one online member existing.
 		# If all members are offline this would mark with MMX_DEFAULT,
