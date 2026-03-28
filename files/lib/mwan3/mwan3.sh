@@ -744,11 +744,11 @@ mwan3_set_policy()
 	if [ $is_lowest -eq 1 ]; then
 	     # Preserve last_resort across flush: capture before -F, re-add after.
 		lr_mark=$($IPT -S "mwan3_policy_$policy" \
-			| grep -E '"(blackhole|unreachable|default)"' \
+			| grep -E ' (blackhole|unreachable|default) ' \
 			| grep -o 'set-xmark [^ /]*' | awk '{print $2}')
 		lr_comment=$($IPT -S "mwan3_policy_$policy" \
-			| grep -E '"(blackhole|unreachable|default)"' \
-			| sed -n 's/.*--comment "\([^"]*\)".*/\1/p')
+			| grep -E ' (blackhole|unreachable|default) ' \
+			| grep -o '\-\-comment [^ ]*' | awk '{print $2}' | tr -d '"')
 		$IPT -F "mwan3_policy_$policy"
 		$IPT -A "mwan3_policy_$policy" \
 		     -m mark --mark 0x0/$MMX_MASK \
