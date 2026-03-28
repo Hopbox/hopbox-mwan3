@@ -1194,6 +1194,10 @@ mwan3_flush_conntrack()
 	local action="$2"
 	local id iface_mark
 
+	# mwan3_init may not have been called in this hotplug context (16-mwan3
+	# does not call it). Read MMX_MASK from state file if not already set.
+	[ -z "$MMX_MASK" ] && MMX_MASK=$(cat ${MWAN3_STATUS_DIR}/mmx_mask 2>/dev/null)
+
 	# Compute mark in parent scope where mwan3_get_iface_id works correctly.
 	# config_list_foreach runs handle_flush in a subshell so export-based
 	# variable passing from mwan3_get_iface_id does not propagate back.
