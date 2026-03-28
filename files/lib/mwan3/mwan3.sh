@@ -1192,26 +1192,25 @@ mwan3_flush_conntrack()
 {
 	local interface="$1"
 	local action="$2"
+	local id iface_mark
+
+	# Compute mark in parent scope where mwan3_get_iface_id works correctly.
+	# config_list_foreach runs handle_flush in a subshell so export-based
+	# variable passing from mwan3_get_iface_id does not propagate back.
+	mwan3_get_iface_id id "$interface"
+	[ -n "$id" ] && iface_mark=$(mwan3_id2mask id MMX_MASK)
 
 	handle_flush() {
 		local flush_conntrack="$1"
 		local action="$2"
-		local mark
-		local id
 
 		if [ "$action" = "$flush_conntrack" ]; then
-			# Derive interface mark from config - reliable, not
-			# dependent on transient runtime state (iptables chains
-			# or ip rules may be partially torn down during failover).
-			mwan3_get_iface_id id "$interface"
-			if [ -n "$id" ]; then
-				mark=$(mwan3_id2mask id MMX_MASK)
-				conntrack -D -m "$mark" 2>/dev/null
-				$LOG info "Conntrack flushed mark $mark for interface '$interface' on action '$action'"
+			if [ -n "$iface_mark" ] && [ "$iface_mark" != "0x0" ]; then
+				conntrack -D -m "$iface_mark" 2>/dev/null
+				$LOG info "Conntrack flushed mark $iface_mark for interface '$interface' on action '$action'"
 			else
-				# Fallback: full flush if mark cannot be determined
 				echo f > ${CONNTRACK_FILE}
-				$LOG warn "Conntrack full flush for interface '$interface' on action '$action' (id not found)"
+				$LOG warn "Conntrack full flush for interface '$interface' on action '$action' (no mark)"
 			fi
 		fi
 	}
