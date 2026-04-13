@@ -655,13 +655,13 @@ mwan3_set_recovery_rule()
 	[ -n "$src_ip" ] && [ "$src_ip" != "0.0.0.0" ] && [ "$src_ip" != "::" ] || return 0
 
 	if [ "$family" = "ipv4" ]; then
-		while [ -n "$($IP4 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+		while $IP4 rule list | grep -q "^$(($id+1500)):"; do
 			$IP4 rule del pref $(($id+1500))
 		done
 		$IP4 rule add pref $(($id+1500)) from "$src_ip" lookup "$id"
 		$LOG info "Recovery rule added: from $src_ip lookup $id for interface $iface"
 	elif [ "$family" = "ipv6" ] && [ $NO_IPV6 -eq 0 ]; then
-		while [ -n "$($IP6 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+		while $IP6 rule list | grep -q "^$(($id+1500)):"; do
 			$IP6 rule del pref $(($id+1500))
 		done
 		$IP6 rule add pref $(($id+1500)) from "$src_ip" lookup "$id"
@@ -681,11 +681,11 @@ mwan3_del_recovery_rule()
 	[ -n "$id" ] || return 0
 
 	if [ "$family" = "ipv4" ]; then
-		while [ -n "$($IP4 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+		while $IP4 rule list | grep -q "^$(($id+1500)):"; do
 			$IP4 rule del pref $(($id+1500))
 		done
 	elif [ "$family" = "ipv6" ] && [ $NO_IPV6 -eq 0 ]; then
-		while [ -n "$($IP6 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+		while $IP6 rule list | grep -q "^$(($id+1500)):"; do
 			$IP6 rule del pref $(($id+1500))
 		done
 	fi
