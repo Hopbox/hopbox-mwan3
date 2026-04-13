@@ -20,6 +20,23 @@ fi
 config_get_bool enabled "$INTERFACE" 'enabled' '0'
 [ "${enabled}" -eq 0 ] || {
 	mwan3_flush_conntrack "$INTERFACE" "$ACTION"
+
+	# Manage src-IP recovery rule so mwan3track pings can reach
+	# targets via the interface's routing table during recovery.
+	case "$ACTION" in
+		disconnected)
+			# Interface just went offline - add recovery rule so
+			# mwan3track pings bypass the unreachable policy mark
+			mwan3_init
+			mwan3_set_recovery_rule "$INTERFACE"
+		;;
+		connected)
+			# Interface back online - remove recovery rule, normal
+			# fwmark policy routing takes over
+			mwan3_init
+			mwan3_del_recovery_rule "$INTERFACE"
+		;;
+	esac
 }
 
 mwan3_unlock "$ACTION" "mwan3rtmon"

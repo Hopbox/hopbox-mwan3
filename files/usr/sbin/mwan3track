@@ -71,6 +71,7 @@ main() {
 	STATUS=$3
 	SRC_IP=$4
 	mkdir -p /var/run/mwan3track/$1
+	echo "$SRC_IP" > /var/run/mwan3track/$1/SRC_IP
 	trap clean_up TERM
 	trap if_down USR1
 

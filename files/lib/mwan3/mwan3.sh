@@ -632,6 +632,65 @@ mwan3_delete_iface_rules()
 	fi
 }
 
+mwan3_set_recovery_rule()
+{
+	# Add a src-IP based ip rule so mwan3track recovery pings bypass
+	# the mangle policy chain (which marks them MMX_UNREACHABLE when all
+	# members are offline) and route directly via the interface's table.
+	#
+	# Priority id+1500 sits between iif rules (id+1000) and fwmark rules
+	# (id+2000), before the blackhole/unreachable rules (2061/2062).
+	# This means unmarked recovery pings sourced from the interface IP
+	# are caught here and routed correctly without touching the policy chain.
+	#
+	# SRC_IP is written by mwan3track on startup to its state dir.
+	local iface="$1"
+	local id src_ip family
+
+	config_get family "$iface" family ipv4
+	mwan3_get_iface_id id "$iface"
+	[ -n "$id" ] || return 0
+
+	src_ip=$(cat "$MWAN3TRACK_STATUS_DIR/$iface/SRC_IP" 2>/dev/null)
+	[ -n "$src_ip" ] && [ "$src_ip" != "0.0.0.0" ] && [ "$src_ip" != "::" ] || return 0
+
+	if [ "$family" = "ipv4" ]; then
+		while [ -n "$($IP4 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+			$IP4 rule del pref $(($id+1500))
+		done
+		$IP4 rule add pref $(($id+1500)) from "$src_ip" lookup "$id"
+		$LOG info "Recovery rule added: from $src_ip lookup $id for interface $iface"
+	elif [ "$family" = "ipv6" ] && [ $NO_IPV6 -eq 0 ]; then
+		while [ -n "$($IP6 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+			$IP6 rule del pref $(($id+1500))
+		done
+		$IP6 rule add pref $(($id+1500)) from "$src_ip" lookup "$id"
+		$LOG info "Recovery rule added: from $src_ip lookup $id for interface $iface"
+	fi
+}
+
+mwan3_del_recovery_rule()
+{
+	# Remove the src-IP recovery rule when interface comes back online
+	# or is fully torn down.
+	local iface="$1"
+	local id family
+
+	config_get family "$iface" family ipv4
+	mwan3_get_iface_id id "$iface"
+	[ -n "$id" ] || return 0
+
+	if [ "$family" = "ipv4" ]; then
+		while [ -n "$($IP4 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+			$IP4 rule del pref $(($id+1500))
+		done
+	elif [ "$family" = "ipv6" ] && [ $NO_IPV6 -eq 0 ]; then
+		while [ -n "$($IP6 rule list | awk '$1 == \"'$(($id+1500)):'\"')" ]; do
+			$IP6 rule del pref $(($id+1500))
+		done
+	fi
+}
+
 mwan3_delete_iface_ipset_entries()
 {
 	local id setname entry

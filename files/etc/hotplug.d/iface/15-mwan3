@@ -68,6 +68,8 @@ case "$ACTION" in
 		mwan3_create_iface_iptables $INTERFACE $DEVICE
 		mwan3_create_iface_rules $INTERFACE $DEVICE
 		mwan3_create_iface_route $INTERFACE $DEVICE
+		# Remove any stale recovery rule - normal fwmark routing takes over
+		mwan3_del_recovery_rule $INTERFACE
 		if [ "${status}" = "online" ]; then
 			$LOG notice "Starting tracker on interface $INTERFACE (${DEVICE:-unknown})"
 			mwan3_set_iface_hotplug_state $INTERFACE "online"
