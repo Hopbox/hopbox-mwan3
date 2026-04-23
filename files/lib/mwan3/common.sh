@@ -52,7 +52,11 @@ mwan3_nft_exec()
 # Start an nft batch transaction
 mwan3_nft_batch_start()
 {
-	MWAN3_NFT_BATCH="/tmp/mwan3_nft_batch.$$"
+	# Use /proc/self to get actual PID even in subshells
+	# (in ash, $$ returns parent PID in subshells)
+	local mypid
+	mypid=$(cut -d' ' -f1 /proc/self/stat 2>/dev/null || echo $$)
+	MWAN3_NFT_BATCH="/tmp/mwan3_nft_batch.${mypid}"
 	: > "$MWAN3_NFT_BATCH"
 }
 
@@ -171,4 +175,8 @@ mwan3_get_src_ip()
 readfile() {
 	[ -f "$2" ] || return 1
 	read -d'\0' "$1" <"$2" || :
+}
+
+get_uptime() {
+    awk '{print int($1)}' /proc/uptime
 }

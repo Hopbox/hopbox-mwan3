@@ -13,31 +13,79 @@ DEFAULT_LOWEST_METRIC=256
 
 mwan3_rtmon_ipv4()
 {
-	local tid line device
+	local idx=0 ret=1 tbl tid family enabled
 
-	$IP4 route list table main | while read -r line; do
-		device=$(echo "$line" | awk '{
-			for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)
-		}')
-		[ -n "$device" ] && echo "$line"
-	done
+	mkdir -p /tmp/mwan3rtmon
+	($IP4 route list table main | grep -v "^default\|linkdown" | sort -n
+	 echo "empty fixup") > /tmp/mwan3rtmon/ipv4.main
 
-	$IP4 monitor route | while read -r line; do
-		case "$line" in
-			*"table main"*)
-				device=$(echo "$line" | awk '{
-					for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)
-				}')
-				[ -n "$device" ] && kill -USR1 $$
-			;;
-		esac
+	while uci get mwan3.@interface[$idx] >/dev/null 2>&1; do
+		tid=$((idx + 1))
+		family=$(uci -q get mwan3.@interface[$idx].family)
+		[ -z "$family" ] && family="ipv4"
+		enabled=$(uci -q get mwan3.@interface[$idx].enabled)
+		[ -z "$enabled" ] && enabled="0"
+
+		[ "$family" = "ipv4" ] && {
+			tbl=$($IP4 route list table $tid 2>/dev/null)
+			if echo "$tbl" | grep -q "^default"; then
+				(echo "$tbl" | grep -v "^default\|linkdown" | sort -n
+				 echo "empty fixup") > /tmp/mwan3rtmon/ipv4.$tid
+				grep -v -x -F -f /tmp/mwan3rtmon/ipv4.main \
+					/tmp/mwan3rtmon/ipv4.$tid | while read line; do
+					$IP4 route del table $tid $line 2>/dev/null
+				done
+				grep -v -x -F -f /tmp/mwan3rtmon/ipv4.$tid \
+					/tmp/mwan3rtmon/ipv4.main | while read line; do
+					$IP4 route add table $tid $line 2>/dev/null
+				done
+			fi
+		}
+		[ "$enabled" = "1" ] && ret=0
+		idx=$((idx + 1))
 	done
+	rm -f /tmp/mwan3rtmon/ipv4.*
+	return $ret
 }
 
 mwan3_rtmon_ipv6()
 {
 	[ $NO_IPV6 -ne 0 ] && return 1
-	return 0
+	local idx=0 ret=1 tbl tid family enabled
+
+	mkdir -p /tmp/mwan3rtmon
+	($IP6 route list table main | \
+		grep -v "^default\|^::/0\|^fe80::/64\|^unreachable" | sort -n
+	 echo "empty fixup") > /tmp/mwan3rtmon/ipv6.main
+
+	while uci get mwan3.@interface[$idx] >/dev/null 2>&1; do
+		tid=$((idx + 1))
+		family=$(uci -q get mwan3.@interface[$idx].family)
+		[ -z "$family" ] && family="ipv4"
+		enabled=$(uci -q get mwan3.@interface[$idx].enabled)
+		[ -z "$enabled" ] && enabled="0"
+
+		[ "$family" = "ipv6" ] && {
+			tbl=$($IP6 route list table $tid 2>/dev/null)
+			if echo "$tbl" | grep -q "^default\|^::/0"; then
+				(echo "$tbl" | \
+					grep -v "^default\|^::/0\|^unreachable" | sort -n
+				 echo "empty fixup") > /tmp/mwan3rtmon/ipv6.$tid
+				grep -v -x -F -f /tmp/mwan3rtmon/ipv6.main \
+					/tmp/mwan3rtmon/ipv6.$tid | while read line; do
+					$IP6 route del table $tid $line 2>/dev/null
+				done
+				grep -v -x -F -f /tmp/mwan3rtmon/ipv6.$tid \
+					/tmp/mwan3rtmon/ipv6.main | while read line; do
+					$IP6 route add table $tid $line 2>/dev/null
+				done
+			fi
+		}
+		[ "$enabled" = "1" ] && ret=0
+		idx=$((idx + 1))
+	done
+	rm -f /tmp/mwan3rtmon/ipv6.*
+	return $ret
 }
 
 # ============================================================
@@ -46,55 +94,66 @@ mwan3_rtmon_ipv6()
 
 mwan3_count_one_bits()
 {
-	local bits mask="$1"
-	bits=0
-	while [ "$mask" -gt 0 ]; do
-		bits=$((bits + (mask & 1)))
-		mask=$((mask >> 1))
+	local count n
+	count=0
+	n=$(($1))
+	while [ "$n" -gt "0" ]; do
+		n=$(( n & (n-1) ))
+		count=$(( count + 1 ))
 	done
-	echo "$bits"
+	echo $count
 }
 
 mwan3_id2mask()
 {
-	# Convert iface id to fwmark value given MMX_MASK
-	# id starts at 1, mark = id << shift_bits
-	local _id _mask shift
-	eval "_id=\$$1"
-	eval "_mask=\$$2"
-
-	shift=$(mwan3_count_one_bits $(( (~_mask) & 0xFFFFFFFF )))
-	echo $(( _id << shift ))
+	# $1 = variable name containing id
+	# $2 = variable name containing mask
+	# Maps id bits into mask bit positions.
+	local _id _mask bit_msk bit_val result
+	eval "_id=\$((\$$1))"
+	eval "_mask=\$((\$$2))"
+	bit_val=0
+	result=0
+	for bit_msk in $(seq 0 31); do
+		if [ $(( (_mask >> bit_msk) & 1 )) = "1" ]; then
+			if [ $(( (_id >> bit_val) & 1 )) = "1" ]; then
+				result=$(( result | (1 << bit_msk) ))
+			fi
+			bit_val=$(( bit_val + 1 ))
+		fi
+	done
+	printf "0x%x" $result
 }
 
 mwan3_init()
 {
-	local bitcount iface_max
+	local bitcnt mmdefault
+
 	config_load mwan3
 
-	config_get iface_max globals iface_max 250
-	[ "$iface_max" -gt 250 ] && iface_max=250
-	MWAN3_INTERFACE_MAX="$iface_max"
+	# Read MMX_MASK from UCI or use default
+	if [ -e "${MWAN3_STATUS_DIR}/mmx_mask" ]; then
+		MMX_MASK=$(cat "${MWAN3_STATUS_DIR}/mmx_mask")
+	else
+		config_get MMX_MASK globals mmx_mask '0x3F00'
+		mkdir -p "$MWAN3_STATUS_DIR"
+		echo "$MMX_MASK" > "${MWAN3_STATUS_DIR}/mmx_mask"
+	fi
 
-	bitcount=$(mwan3_count_one_bits $iface_max)
-	bitcount=$((bitcount + 1))
+	# Compute interface max from mask bit count
+	bitcnt=$(mwan3_count_one_bits $MMX_MASK)
+	mmdefault=$(( (1 << bitcnt) - 1 ))
+	MWAN3_INTERFACE_MAX=$(( mmdefault - 3 ))
 
-	# Build MMX_MASK from interface count
-	local mask=0 i=0
-	while [ $i -lt $bitcount ]; do
-		mask=$(( (mask << 1) | 1 ))
-		i=$((i + 1))
-	done
-	mask=$(( mask << (16 - bitcount) ))
-	MMX_MASK=$(printf "0x%08x" $mask)
+	# Special marks using mwan3_id2mask (same bit-mapping as interface ids)
+	MM_BLACKHOLE=$(( mmdefault - 2 ))
+	MM_UNREACHABLE=$(( mmdefault - 1 ))
 
-	MMX_DEFAULT=$(printf "0x%08x" $mask)
-	MM_BLACKHOLE=253
-	MMX_BLACKHOLE=$(printf "0x%08x" $((MM_BLACKHOLE << (16 - bitcount))))
-	MM_UNREACHABLE=254
-	MMX_UNREACHABLE=$(printf "0x%08x" $((MM_UNREACHABLE << (16 - bitcount))))
+	MMX_DEFAULT=$(mwan3_id2mask mmdefault MMX_MASK)
+	MMX_BLACKHOLE=$(mwan3_id2mask MM_BLACKHOLE MMX_MASK)
+	MMX_UNREACHABLE=$(mwan3_id2mask MM_UNREACHABLE MMX_MASK)
 
-	# Persist mask for hotplug scripts that don't call mwan3_init
+	# Persist for hotplug scripts that don't call mwan3_init
 	mkdir -p "$MWAN3_STATUS_DIR"
 	echo "$MMX_MASK" > "${MWAN3_STATUS_DIR}/mmx_mask"
 	echo "$MMX_DEFAULT" > "${MWAN3_STATUS_DIR}/mmx_default"
@@ -317,14 +376,12 @@ mwan3_delete_iface_nft()
 {
 	local iface="$1" device
 	local chain="mwan3_iface_in_${iface}"
-	local track_chain="mwan3_track_${iface}"
 
 	network_get_device device "$iface"
 
 	mwan3_nft_batch_start
 
-	# Remove jump from ifaces_in by flushing only our specific rule
-	# Simpler: find handle by chain name (more reliable than device+chain match)
+	# Remove jump from ifaces_in
 	if [ -n "$device" ]; then
 		local handle
 		handle=$($NFT -a list chain $MWAN3_NFT_TABLE mwan3_ifaces_in \
@@ -334,14 +391,11 @@ mwan3_delete_iface_nft()
 			mwan3_nft_push "delete rule $MWAN3_NFT_TABLE mwan3_ifaces_in handle $handle"
 	fi
 
-	# Flush and delete chains
+	# Flush and delete iface_in chain only
+	# (track chain handled separately by mwan3_delete_track_iface_nft)
 	mwan3_nft_chain_exists "$chain" && {
 		mwan3_nft_push "flush chain $MWAN3_NFT_TABLE $chain"
 		mwan3_nft_push "delete chain $MWAN3_NFT_TABLE $chain"
-	}
-	mwan3_nft_chain_exists "$track_chain" && {
-		mwan3_nft_push "flush chain $MWAN3_NFT_TABLE $track_chain"
-		mwan3_nft_push "delete chain $MWAN3_NFT_TABLE $track_chain"
 	}
 
 	mwan3_nft_batch_commit
@@ -424,10 +478,12 @@ mwan3_delete_track_iface_nft()
 
 	mwan3_nft_batch_start
 
-	# Remove jump from mwan3_track_ifaces
+	# Remove jump from mwan3_track_ifaces FIRST — must happen before
+	# chain deletion or nft reports "Resource busy"
 	local handle
-	handle=$($NFT -a list chain $MWAN3_NFT_TABLE mwan3_track_ifaces 2>/dev/null | \
-		awk "/$track_chain/"'{print $NF}')
+	handle=$($NFT -a list chain $MWAN3_NFT_TABLE mwan3_track_ifaces \
+		2>/dev/null | \
+		awk -v c="$track_chain" '$0 ~ "jump "c" " || $0 ~ "jump "c"$" {print $NF}')
 	[ -n "$handle" ] && \
 		mwan3_nft_push "delete rule $MWAN3_NFT_TABLE mwan3_track_ifaces handle $handle"
 
@@ -722,19 +778,25 @@ _build_policy_chain()
 		mwan3_nft_push "add rule $MWAN3_NFT_TABLE $chain meta mark & $MMX_MASK == 0 $(mwan3_nft_mark_expr $mark $MMX_MASK)"
 	else
 		# Multiple members — numgen weighted random
+		# nft vmap only accepts verdicts (jump/goto) not statements
+		# Use separate rules with numgen range comparisons instead
 		local running=0
-		local map_entries=""
+		local m iface_id weight mark end
 		for m in $active_members; do
-			local iface_id weight mark end
 			iface_id=$(echo "$m" | cut -d: -f2)
 			weight=$(echo "$m" | cut -d: -f3)
 			mark=$(mwan3_id2mask iface_id MMX_MASK)
 			end=$((running + weight - 1))
-			[ -n "$map_entries" ] && map_entries="${map_entries}, "
-			map_entries="${map_entries}${running}-${end} : $(mwan3_nft_mark_expr $mark $MMX_MASK)"
+			if [ $running -eq 0 ]; then
+				# First range: numgen < weight
+				mwan3_nft_push "add rule $MWAN3_NFT_TABLE $chain meta mark & $MMX_MASK == 0 numgen random mod $total_weight < $weight $(mwan3_nft_mark_expr $mark $MMX_MASK)"
+			else
+				# Subsequent ranges: numgen >= start
+				# Previous rule already handled lower range so >= is sufficient
+				mwan3_nft_push "add rule $MWAN3_NFT_TABLE $chain meta mark & $MMX_MASK == 0 numgen random mod $total_weight >= $running $(mwan3_nft_mark_expr $mark $MMX_MASK)"
+			fi
 			running=$((running + weight))
 		done
-		mwan3_nft_push "add rule $MWAN3_NFT_TABLE $chain meta mark & $MMX_MASK == 0 numgen random mod $total_weight vmap { $map_entries }"
 	fi
 
 	mwan3_nft_batch_commit
@@ -912,13 +974,30 @@ mwan3_report_policies_v4()
 	config_foreach _report_policy_v4 policy
 }
 
+_report_member_status()
+{
+	local member="$1"
+	local iface weight metric status
+	config_get iface "$member" interface
+	config_get weight "$member" weight 1
+	config_get metric "$member" metric 1
+	[ -z "$iface" ] && return
+	mwan3_get_iface_hotplug_state status "$iface"
+	printf "  %-20s weight:%s metric:%s [%s]\n" \
+		"$iface" "$weight" "$metric" "$status"
+}
+
 _report_policy_v4()
 {
 	local policy="$1"
 	local chain="mwan3_policy_${policy}"
-	echo "  Policy $policy:"
-	$NFT list chain $MWAN3_NFT_TABLE "$chain" 2>/dev/null | \
-		grep -v "^table\|^chain\|^}" | sed 's/^/    /'
+	echo "$policy:"
+	config_list_foreach "$policy" use_member _report_member_status
+	local rules
+	rules=$($NFT list chain $MWAN3_NFT_TABLE "$chain" 2>/dev/null | \
+		grep -v "^table\|^chain\|^}" | sed 's/^\s*/  /')
+	[ -n "$rules" ] && echo "$rules" || echo "  (no active rules)"
+	echo ""
 }
 
 mwan3_report_policies_v6()
@@ -986,13 +1065,17 @@ mwan3_track()
 	mkdir -p "${MWAN3TRACK_STATUS_DIR}/${iface}"
 	echo "$src_ip" > "${MWAN3TRACK_STATUS_DIR}/${iface}/SRC_IP"
 
+	# Determine initial STATUS from hotplug state
+	local status
+	mwan3_get_iface_hotplug_state status "$iface"
+	[ -z "$status" ] && status="online"
+
 	# Update track_hook nft rules for this interface
 	mwan3_update_track_iface_nft "$iface"
 
 	[ -x /usr/sbin/mwan3track ] && \
-		/usr/sbin/mwan3track "$iface" "$device" "$src_ip" \
-			"$reliability" "$count" "$timeout" "$interval" \
-			"$down" "$up" $track_ips &
+		/usr/sbin/mwan3track "$iface" "$device" "$status" "$src_ip" \
+			$track_ips &
 }
 
 mwan3_track_signal()

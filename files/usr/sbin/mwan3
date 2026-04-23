@@ -150,6 +150,9 @@ start()
 
 	config_load mwan3
 	config_foreach ifup interface
+
+	# Start route monitor daemon
+	[ -x /usr/sbin/mwan3rtmon ] && /usr/sbin/mwan3rtmon &
 }
 
 stop()
