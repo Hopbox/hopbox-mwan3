@@ -1,0 +1,273 @@
+'use strict';
+
+import { popen, readfile } from 'fs';
+import { cursor } from 'uci';
+
+const ubus = require('ubus').connect();
+
+function get_str_raw(iface, property) {
+	return readfile(sprintf('/var/run/mwan3track/%s/%s', iface, property));
+}
+
+function get_str(iface, property) {
+	return rtrim(get_str_raw(iface, property), '\n');
+}
+
+function get_int(iface, property) {
+	return int(get_str(iface, property));
+}
+
+function get_uptime() {
+	return int(split(readfile('/proc/uptime'), '.', 2)[0]);
+}
+
+function get_x_time(uptime, iface, property) {
+	let t = get_int(iface, property);
+	if (t > 0) {
+		t = uptime - t;
+	}
+	return t;
+}
+
+function ucibool(val) {
+	switch (val) {
+		case 'yes':
+		case 'on':
+		case 'true':
+		case 'enabled':
+			return true;
+		default:
+			return !!int(val);
+	}
+}
+
+function get_mwan3track_status(iface, uci_track_ips, procd) {
+	if (length(uci_track_ips) == 0) {
+		return 'disabled';
+	}
+	if (procd?.[sprintf('track_%s', iface)]?.running) {
+		const started = get_str(iface, 'STARTED');
+		switch (started) {
+			case '0':
+				return 'paused';
+			case '1':
+				return 'active';
+			default:
+				return 'down';
+		}
+	}
+	return 'down';
+}
+
+const nft_connected_set = {
+	'4': 'mwan3_connected_v4',
+	'6': 'mwan3_connected_v6',
+};
+
+function get_connected_ips(version) {
+	const setname = nft_connected_set[version];
+	const nft = popen(sprintf('nft -j list set inet fw4 %s 2>/dev/null', setname), 'r');
+	if (!nft) {
+		return [];
+	}
+	const raw = nft.read('all');
+	nft.close();
+
+	if (!raw || length(raw) == 0) {
+		return [];
+	}
+
+	let data;
+	try {
+		data = json(raw);
+	} catch(e) {
+		return [];
+	}
+
+	const ips = [];
+	// nft JSON output: { nftables: [ { set: { elem: [ ... ] } } ] }
+	if (data?.nftables) {
+		for (let item in data.nftables) {
+			if (item?.set?.elem) {
+				for (let elem in item.set.elem) {
+					if (type(elem) == 'string') {
+						push(ips, elem);
+					} else if (type(elem) == 'object') {
+						// Handle prefix notation: { prefix: { addr: "x.x.x.x", len: N } }
+						if (elem?.prefix) {
+							push(ips, sprintf('%s/%d', elem.prefix.addr, elem.prefix.len));
+						} else if (elem?.range) {
+							push(ips, sprintf('%s-%s', elem.range[0], elem.range[1]));
+						}
+					}
+				}
+			}
+		}
+	}
+	return ips;
+}
+
+function get_policies(version) {
+	// List all chains in fw4 and find mwan3_policy_* chains
+	const nft = popen('nft -j list chains inet fw4 2>/dev/null', 'r');
+	if (!nft) {
+		return {};
+	}
+	const raw = nft.read('all');
+	nft.close();
+
+	if (!raw || length(raw) == 0) {
+		return {};
+	}
+
+	let data;
+	try {
+		data = json(raw);
+	} catch(e) {
+		return {};
+	}
+
+	const policy_names = [];
+	if (data?.nftables) {
+		for (let item in data.nftables) {
+			if (item?.chain?.name && match(item.chain.name, regexp('^mwan3_policy_'))) {
+				const name = substr(item.chain.name, 14); // strip "mwan3_policy_"
+				push(policy_names, name);
+			}
+		}
+	}
+
+	const policies = {};
+	for (let pname in policy_names) {
+		const chain_nft = popen(sprintf('nft -j list chain inet fw4 mwan3_policy_%s 2>/dev/null', pname), 'r');
+		if (!chain_nft) continue;
+		const chain_raw = chain_nft.read('all');
+		chain_nft.close();
+
+		let chain_data;
+		try {
+			chain_data = json(chain_raw);
+		} catch(e) {
+			continue;
+		}
+
+		policies[pname] = [];
+
+		// Parse numgen map rules to extract weights
+		if (chain_data?.nftables) {
+			for (let item in chain_data.nftables) {
+				if (!item?.rule?.expr) continue;
+				for (let expr in item.rule.expr) {
+					// Look for numgen with vmap
+					if (expr?.mangle?.value?.map?.data?.set) {
+						const mapset = expr.mangle.value.map.data.set;
+						const mod_val = expr.mangle.value.map.key?.numgen?.mod;
+						if (mod_val && length(mapset) > 0) {
+							for (let mapping in mapset) {
+								if (type(mapping) == 'array' && length(mapping) == 2) {
+									const range = mapping[0];
+									const mark = mapping[1];
+									let weight = 1;
+									if (type(range) == 'object' && range?.range) {
+										weight = range.range[1] - range.range[0] + 1;
+									}
+									push(policies[pname], {
+										'interface': sprintf('mark_%s', mark),
+										'percent': weight / mod_val * 100,
+									});
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return policies;
+}
+
+function interfaces_status(request) {
+	const uci = cursor();
+	const procd = ubus.call('service', 'list', { 'name': 'mwan3' })?.mwan3?.instances;
+	const interfaces = {};
+	uci.foreach('mwan3', 'interface', intf => {
+		const ifname = intf['.name'];
+		if (request.args.interface != null && request.args.interface != ifname) {
+			return;
+		}
+		const netstatus = ubus.call(sprintf('network.interface.%s', ifname), 'status', {});
+		const uptime = get_uptime();
+		const uci_track_ips = intf['track_ip'];
+		const track_status = get_mwan3track_status(ifname, uci_track_ips, procd);
+		const track_ips = [];
+		for (let ip in uci_track_ips) {
+			push(track_ips, {
+				'ip': ip,
+				'status': get_str(ifname, sprintf('TRACK_%s', ip)) || 'unknown',
+				'latency': get_int(ifname, sprintf('LATENCY_%s', ip)),
+				'packetloss': get_int(ifname, sprintf('LOSS_%s', ip)),
+			});
+		}
+		interfaces[ifname] = {
+			'age': get_x_time(uptime, ifname, 'TIME'),
+			'online': get_x_time(uptime, ifname, 'ONLINE'),
+			'offline': get_x_time(uptime, ifname, 'OFFLINE'),
+			'uptime': netstatus?.uptime || 0,
+			'score': get_int(ifname, 'SCORE'),
+			'lost': get_int(ifname, 'LOST'),
+			'turn': get_int(ifname, 'TURN'),
+			'status': get_str(ifname, 'STATUS') || 'unknown',
+			'enabled': ucibool(intf['enabled']),
+			'running': track_status == 'active',
+			'tracking': track_status,
+			'up': netstatus?.up || false,
+			'track_ip': track_ips,
+		};
+	});
+	return interfaces;
+}
+
+const methods = {
+	status: {
+		args: {
+			section: 'section',
+			interface: 'interface'
+		},
+		call: function (request) {
+			switch (request.args.section) {
+				case 'connected':
+					return {
+						'connected': {
+							'ipv4': get_connected_ips('4'),
+							'ipv6': get_connected_ips('6'),
+						},
+					};
+				case 'policies':
+					return {
+						'policies': {
+							'ipv4': get_policies('4'),
+							'ipv6': get_policies('6'),
+						},
+					};
+				case 'interfaces':
+					return {
+						'interfaces': interfaces_status(request),
+					};
+				default:
+					return {
+						'interfaces': interfaces_status(request),
+						'connected': {
+							'ipv4': get_connected_ips('4'),
+							'ipv6': get_connected_ips('6'),
+						},
+						'policies': {
+							'ipv4': get_policies('4'),
+							'ipv6': get_policies('6'),
+						},
+					};
+			}
+		}
+	}
+};
+
+return { 'mwan3': methods };

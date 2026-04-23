@@ -44,6 +44,16 @@ validate_track_method() {
 				return 1
 			}
 			;;
+		curl-204)
+			which curl 1>/dev/null 2>&1 || {
+				$LOG warn "Missing curl. Please install curl package."
+				return 1
+			}
+			[ -n "$2" -a "$2" != "0.0.0.0" -a "$2" != "::" ] || {
+				$LOG warn "Cannot determine source IP for the interface which is required by curl-204."
+				return 1
+			}
+			;;
 		nping-*)
 			which nping 1>/dev/null 2>&1 || {
 				$LOG warn "Missing nping. Please install nping package."
@@ -71,6 +81,7 @@ main() {
 	STATUS=$3
 	SRC_IP=$4
 	mkdir -p /var/run/mwan3track/$1
+	echo "$$" > /var/run/mwan3track/$1/PID
 	echo "$SRC_IP" > /var/run/mwan3track/$1/SRC_IP
 	trap clean_up TERM
 	trap if_down USR1
@@ -103,6 +114,8 @@ main() {
 	config_get recovery_latency $1 recovery_latency 500
 	config_get failure_loss $1 failure_loss 40
 	config_get recovery_loss $1 recovery_loss 10
+	config_get degraded_loss $1 degraded_loss 5
+	config_get degraded_latency $1 degraded_latency 200
 
 	local score=$(($down+$up))
 	local track_ips=$(echo $* | cut -d ' ' -f 5-99)
@@ -168,6 +181,28 @@ main() {
 						fi
 						result=$?
 					;;
+					curl-204)
+						# Sanitize track_ip for use as filename
+						local track_ip_safe
+						track_ip_safe=$(echo "$track_ip" | tr '/: ' '___')
+						local http_code
+						http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+							--interface "$SRC_IP" \
+							--connect-timeout "$timeout" \
+							--max-time "$timeout" \
+							"$track_ip" 2>/dev/null)
+						if [ "$http_code" = "204" ]; then
+							result=0
+						elif [ "$http_code" != "000" ]; then
+							# Got a response but not 204 — captive portal
+							result=0
+							env -i ACTION="captive" INTERFACE="$1" DEVICE="$2" \
+								HTTP_CODE="$http_code" \
+								/sbin/hotplug-call iface
+						else
+							result=1
+						fi
+					;;
 					nping-tcp)
 						result=$(nping -e $DEVICE -c $count $track_ip --tcp | grep Lost | awk '{print $12}')
 					;;
@@ -205,6 +240,16 @@ main() {
 						if [ $score -gt $up ]; then
 							$LOG info "Check (${track_method}: latency=${latency}ms loss=${loss}%) failed for target \"$track_ip\" on interface $1 ($2)"
 						fi
+					elif [ "$loss" -ge "$degraded_loss" -o "$latency" -ge "$degraded_latency" ]; then
+						# Quality degraded but not failed — fire degraded action
+						let host_up_count++
+						echo "degraded" > /var/run/mwan3track/$1/TRACK_${track_ip}
+						echo "$latency" > /var/run/mwan3track/$1/LATENCY_${track_ip}
+						echo "$loss" > /var/run/mwan3track/$1/LOSS_${track_ip}
+						env -i ACTION="degraded" INTERFACE="$1" DEVICE="$2" \
+							LOSS="$loss" LATENCY="$latency" \
+							/sbin/hotplug-call iface
+						$LOG info "Check (${track_method}: latency=${latency}ms loss=${loss}%) degraded for target \"$track_ip\" on interface $1 ($2)"
 					elif [ "$loss" -le "$recovery_loss" -a "$latency" -le "$recovery_latency" ]; then
 						let host_up_count++
 						echo "up" > /var/run/mwan3track/$1/TRACK_${track_ip}

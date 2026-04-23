@@ -1,0 +1,22 @@
+# mwan3 nftables skeleton
+# This file is loaded by fw4 at startup to pre-create mwan3 chains/sets.
+# Dynamic rules are populated by mwan3 hotplug scripts.
+# fw4 reload triggers mwan3-fw-rebuild.sh to repopulate rules.
+
+# Sets for network classification
+# (populated by mwan3 on ifup/ifdown events)
+add set inet fw4 mwan3_connected_v4 { type ipv4_addr; flags interval; auto-merge; }
+add set inet fw4 mwan3_custom_v4    { type ipv4_addr; flags interval; auto-merge; }
+add set inet fw4 mwan3_dynamic_v4   { type ipv4_addr; flags interval; auto-merge; }
+
+# Hook chains — mwan3 adds rules at runtime
+add chain inet fw4 mwan3_prerouting { type filter hook prerouting priority mangle + 1; policy accept; }
+add chain inet fw4 mwan3_output     { type route hook output priority mangle + 1; policy accept; }
+
+# Internal chains
+add chain inet fw4 mwan3_ifaces_in
+add chain inet fw4 mwan3_rules
+add chain inet fw4 mwan3_connected
+add chain inet fw4 mwan3_custom
+add chain inet fw4 mwan3_dynamic
+add chain inet fw4 mwan3_track_ifaces

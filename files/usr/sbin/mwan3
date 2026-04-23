@@ -11,9 +11,9 @@ help()
 Syntax: mwan3 [command]
 
 Available commands:
-	start           Load iptables rules, ip rules and ip routes
-	stop            Unload iptables rules, ip rules and ip routes
-	restart         Reload iptables rules, ip rules and ip routes
+	start           Load nft rules, ip rules and ip routes
+	stop            Unload nft rules, ip rules and ip routes
+	restart         Reload nft rules, ip rules and ip routes
 	ifup <iface>    Load rules and routes for specific interface
 	ifdown <iface>  Unload rules and routes for specific interface
 	interfaces      Show interfaces status
@@ -143,13 +143,18 @@ start()
 	uci_toggle_state mwan3 globals enabled "1"
 	mwan3_unlock "command" "mwan3"
 
+	# Initialize nft framework before bringing up interfaces
+	mwan3_set_general_nft
+	mwan3_set_connected_sets
+	mwan3_set_custom_sets
+
 	config_load mwan3
 	config_foreach ifup interface
 }
 
 stop()
 {
-	local ipset route rule table IP IPT pid
+	local route rule pid
 
 	mwan3_lock "command" "mwan3"
 	uci_toggle_state mwan3 globals enabled "0"
@@ -175,37 +180,27 @@ stop()
 	config_load mwan3
 	config_foreach mwan3_track_clean interface
 
-	for IP in "$IP4" "$IP6"; do
-		[ "$IP" = "$IP6" ] && [ $NO_IPV6 -ne 0 ] && continue
-		for route in $(seq 1 $MWAN3_INTERFACE_MAX); do
-			$IP route flush table $route &> /dev/null
-		done
-
-		for rule in $($IP rule list | egrep '^[1-2][0-9]{3}\:' | cut -d ':' -f 1); do
-			$IP rule del pref $rule &> /dev/null
-		done
+	# Flush ip routes and rules
+	for route in $(seq 1 $MWAN3_INTERFACE_MAX); do
+		$IP4 route flush table $route &> /dev/null
 	done
 
-	for IPT in "$IPT4" "$IPT6"; do
-		[ "$IPT" = "$IPT6" ] && [ $NO_IPV6 -ne 0 ] && continue
-		$IPT -D PREROUTING -j mwan3_hook &> /dev/null
-		$IPT -D OUTPUT -j mwan3_hook &> /dev/null
-
-		for table in $($IPT -S | awk '{print $2}' | grep mwan3 | sort -u); do
-			$IPT -F $table &> /dev/null
-		done
-
-		for table in $($IPT -S | awk '{print $2}' | grep mwan3 | sort -u); do
-			$IPT -X $table &> /dev/null
-		done
+	for rule in $($IP4 rule list | grep -E '^[1-2][0-9]{3}:' | cut -d ':' -f 1); do
+		$IP4 rule del pref $rule &> /dev/null
 	done
 
-	for ipset in $($IPS -n list | grep mwan3_); do
-		$IPS -q destroy $ipset
+	# Flush all mwan3 nft chains and sets from table inet fw4
+	for chain in $($NFT list table inet fw4 2>/dev/null | \
+		awk '/chain mwan3/{print $2}'); do
+		$NFT flush chain inet fw4 "$chain" 2>/dev/null
+		# Only delete non-base chains (base chains can't be deleted)
+		$NFT delete chain inet fw4 "$chain" 2>/dev/null
 	done
 
-	for ipset in $($IPS -n list | grep mwan3 | grep -E '_v4|_v6'); do
-		$IPS -q destroy $ipset
+	for set in $($NFT list table inet fw4 2>/dev/null | \
+		awk '/set mwan3/{print $2}'); do
+		$NFT flush set inet fw4 "$set" 2>/dev/null
+		$NFT delete set inet fw4 "$set" 2>/dev/null
 	done
 
 	mwan3_unlock "command" "mwan3"

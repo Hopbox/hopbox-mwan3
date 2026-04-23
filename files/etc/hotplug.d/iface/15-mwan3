@@ -2,95 +2,84 @@
 
 . /lib/functions.sh
 . /lib/functions/network.sh
+. /lib/mwan3/common.sh
 . /lib/mwan3/mwan3.sh
-. /usr/share/libubox/jshn.sh
 
-[ "$ACTION" == "ifup" -o "$ACTION" == "ifdown" ] || exit 1
-[ -n "$INTERFACE" ] || exit 2
+[ -z "$INTERFACE" ] && exit 0
 
-if [ "$ACTION" == "ifup" ]; then
-	[ -n "$DEVICE" ] || exit 3
-fi
-
-mwan3_lock "$ACTION" "$INTERFACE"
+# Only handle interfaces configured in mwan3
 config_load mwan3
-config_get_bool enabled globals 'enabled' '0'
-[ "${enabled}" -gt 0 ] || {
-	mwan3_unlock "$ACTION" "$INTERFACE"
-	exit 0
-}
+enabled=0
+config_get enabled "$INTERFACE" enabled 0
+[ "$enabled" -eq 1 ] || exit 0
 
-mwan3_init
-mwan3_set_connected_iptables
-mwan3_set_custom_ipset
-
-config_get initial_state $INTERFACE initial_state "online"
-config_get_bool enabled $INTERFACE 'enabled' '0'
-[ "${enabled}" -eq 1 ] || {
-	mwan3_unlock "$ACTION" "$INTERFACE"
-	exit 0
-}
-
-if [ "$ACTION" = "ifup" ]; then
-	config_get family $INTERFACE family ipv4
-	if [ "$family" = "ipv4" ]; then
-		ubus call network.interface.${INTERFACE}_4 status &>/dev/null
-		if [ "$?" -eq "0" ]; then
-			network_get_ipaddr src_ip ${INTERFACE}_4
-		else
-			network_get_ipaddr src_ip ${INTERFACE}
-		fi
-		[ -n "$src_ip" ] || src_ip="0.0.0.0"
-	elif [ "$family" = "ipv6" ]; then
-		ubus call network.interface.${INTERFACE}_6 status &>/dev/null
-		if [ "$?" -eq "0" ]; then
-			network_get_ipaddr6 src_ip ${INTERFACE}_6
-		else
-			network_get_ipaddr6 src_ip ${INTERFACE}
-		fi
-		[ -n "$src_ip" ] || src_ip="::"
-	fi
-fi
-
-if [ "$initial_state" = "offline" ]; then
-	status=$(cat $MWAN3TRACK_STATUS_DIR/$INTERFACE/STATUS 2>/dev/null || echo unknown)
-	[ "$status" = "online" ] || status=offline
-else
-	status=online
-fi
-
-$LOG notice "Execute "$ACTION" event on interface $INTERFACE (${DEVICE:-unknown})"
+# Load marks from state (hotplug doesn't call mwan3_init)
+[ -z "$MMX_MASK" ] && MMX_MASK=$(cat "${MWAN3_STATUS_DIR}/mmx_mask" 2>/dev/null)
+[ -z "$MMX_DEFAULT" ] && MMX_DEFAULT=$(cat "${MWAN3_STATUS_DIR}/mmx_default" 2>/dev/null)
+[ -z "$MMX_UNREACHABLE" ] && MMX_UNREACHABLE=$(cat "${MWAN3_STATUS_DIR}/mmx_unreachable" 2>/dev/null)
+[ -z "$MMX_BLACKHOLE" ] && MMX_BLACKHOLE=$(cat "${MWAN3_STATUS_DIR}/mmx_blackhole" 2>/dev/null)
 
 case "$ACTION" in
 	ifup)
-		mwan3_set_general_rules
-		mwan3_set_general_iptables
-		mwan3_create_iface_iptables $INTERFACE $DEVICE
-		mwan3_create_iface_rules $INTERFACE $DEVICE
-		mwan3_create_iface_route $INTERFACE $DEVICE
-		# Remove any stale recovery rule - normal fwmark routing takes over
-		mwan3_del_recovery_rule $INTERFACE
-		if [ "${status}" = "online" ]; then
-			$LOG notice "Starting tracker on interface $INTERFACE (${DEVICE:-unknown})"
-			mwan3_set_iface_hotplug_state $INTERFACE "online"
-			mwan3_track $INTERFACE $DEVICE "online" "$src_ip"
-		else
-			$LOG notice "Starting tracker on interface $INTERFACE (${DEVICE:-unknown})"
-			mwan3_set_iface_hotplug_state $INTERFACE "offline"
-			mwan3_track $INTERFACE $DEVICE "offline" "$src_ip"
-		fi
-		mwan3_set_policies_iptables
+		mwan3_lock "hotplug" "$INTERFACE"
+
+		# Remove stale recovery rule (interface back online)
+		mwan3_del_recovery_rule "$INTERFACE"
+
+		# Setup routing
+		mwan3_create_iface_route "$INTERFACE"
+		mwan3_create_iface_rules "$INTERFACE"
+
+		# Setup nft rules for this interface
+		mwan3_create_iface_nft "$INTERFACE"
+
+		# Rebuild general nft framework if needed (must be before set population)
+		$NFT list chain $MWAN3_NFT_TABLE mwan3_prerouting 2>/dev/null | \
+			grep -q "meta mark" || mwan3_set_general_nft
+
+		# Update connected and custom sets (after framework exists)
+		mwan3_set_connected_sets
+		mwan3_set_custom_sets
+
+		# Rebuild all policies (this interface may be a member)
+		mwan3_set_policies_nft
+
+		# Rebuild user rules
 		mwan3_set_user_rules
-	;;
+
+		# Mark interface online and start tracking
+		mwan3_set_iface_hotplug_state "$INTERFACE" "online"
+		mwan3_track "$INTERFACE"
+
+		mwan3_flush_conntrack "$INTERFACE" "ifup"
+		mwan3_unlock "hotplug" "$INTERFACE"
+		;;
+
 	ifdown)
-		mwan3_set_iface_hotplug_state $INTERFACE "offline"
-		mwan3_delete_iface_ipset_entries $INTERFACE
-		mwan3_track_signal $INTERFACE $DEVICE
-		mwan3_set_policies_iptables
-		mwan3_set_user_rules
-	;;
+		mwan3_lock "hotplug" "$INTERFACE"
+
+		# Kill tracker
+		kill $(cat "${MWAN3TRACK_STATUS_DIR}/${INTERFACE}/PID" 2>/dev/null) \
+			2>/dev/null
+
+		# Mark offline
+		mwan3_set_iface_hotplug_state "$INTERFACE" "offline"
+
+		# Selective conntrack flush for this interface's flows
+		mwan3_flush_conntrack "$INTERFACE" "ifdown"
+
+		# WireGuard re-handshake so tunnels move to surviving WAN
+		mwan3_wg_rehandshake
+
+		# Remove nft and routing rules
+		mwan3_delete_iface_nft "$INTERFACE"
+		mwan3_delete_track_iface_nft "$INTERFACE"
+		mwan3_delete_iface_rules "$INTERFACE"
+		mwan3_delete_iface_route "$INTERFACE"
+
+		# Rebuild policies (this interface removed from pool)
+		mwan3_set_policies_nft
+
+		mwan3_unlock "hotplug" "$INTERFACE"
+		;;
 esac
-
-mwan3_unlock "$ACTION" "$INTERFACE"
-
-exit 0
