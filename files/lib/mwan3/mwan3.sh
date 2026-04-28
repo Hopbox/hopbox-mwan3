@@ -1214,14 +1214,3 @@ mwan3_track_signal()
 	kill -USR1 $(cat "${MWAN3TRACK_STATUS_DIR}/${iface}/PID" 2>/dev/null) \
 		2>/dev/null
 }
-
-# ============================================================
-# rtmon
-# ============================================================
-
-mwan3_rtmon()
-{
-	local iface="$1"
-	mwan3_rtmon_ipv4 || mwan3_rtmon_ipv6
-}
-
