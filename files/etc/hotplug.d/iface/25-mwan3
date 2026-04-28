@@ -16,6 +16,9 @@
 [ -z "$MMX_UNREACHABLE" ] && MMX_UNREACHABLE=$(cat "${MWAN3_STATUS_DIR}/mmx_unreachable" 2>/dev/null)
 [ -z "$MMX_BLACKHOLE" ] && MMX_BLACKHOLE=$(cat "${MWAN3_STATUS_DIR}/mmx_blackhole" 2>/dev/null)
 
+# If state files missing (first boot or /var/run cleared), init now
+[ -z "$MMX_MASK" ] && mwan3_init
+
 config_load mwan3
 
 enabled_global=0
