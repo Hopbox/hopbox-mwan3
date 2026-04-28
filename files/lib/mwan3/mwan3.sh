@@ -843,7 +843,9 @@ mwan3_set_user_nft_rule()
 
 	# Protocol — nft uses l4proto for matching, but tcp/udp keywords
 	# work directly for port matching
-	local proto_match=""
+	local proto_match="" ip_family="ip"
+	[ "$family" = "ipv6" ] && ip_family="ip6"
+
 	case "$proto" in
 		all) ;;
 		tcp|udp)
@@ -851,28 +853,32 @@ mwan3_set_user_nft_rule()
 			match="$match meta l4proto $proto"
 			;;
 		icmp)
-			match="$match ip protocol icmp"
-			proto_match="icmp"
+			if [ "$family" = "ipv6" ]; then
+				match="$match meta l4proto icmpv6"
+				proto_match="icmpv6"
+			else
+				match="$match ip protocol icmp"
+				proto_match="icmp"
+			fi
 			;;
 		*)
-			match="$match ip protocol $proto"
+			match="$match $ip_family nexthdr $proto"
 			proto_match="$proto"
 			;;
 	esac
 
 	# Source
-	[ -n "$src_ip" ] && match="$match ip saddr $src_ip"
+	[ -n "$src_ip" ] && match="$match $ip_family saddr $src_ip"
 	[ -n "$src_dev" ] && match="$match iifname \"$src_dev\""
 	if [ -n "$src_port" ] && [ -n "$proto_match" ] && \
 	   [ "$proto_match" = "tcp" -o "$proto_match" = "udp" ]; then
-		# Normalize port list: "80,443" → "{ 80, 443 }"
 		local port_list
 		port_list=$(echo "$src_port" | sed 's/,/, /g')
 		match="$match $proto_match sport { $port_list }"
 	fi
 
 	# Destination
-	[ -n "$dest_ip" ] && match="$match ip daddr $dest_ip"
+	[ -n "$dest_ip" ] && match="$match $ip_family daddr $dest_ip"
 	if [ -n "$dest_port" ] && [ -n "$proto_match" ] && \
 	   [ "$proto_match" = "tcp" -o "$proto_match" = "udp" ]; then
 		local port_list
@@ -880,8 +886,8 @@ mwan3_set_user_nft_rule()
 		match="$match $proto_match dport { $port_list }"
 	fi
 
-	# nftset match (replaces ipset)
-	[ -n "$ipset" ] && match="$match ip daddr @${ipset}"
+	# nftset match
+	[ -n "$ipset" ] && match="$match $ip_family daddr @${ipset}"
 
 	# Mark must be unset
 	match="$match meta mark & $MMX_MASK == 0"
