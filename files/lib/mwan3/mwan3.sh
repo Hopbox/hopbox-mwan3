@@ -990,10 +990,14 @@ mwan3_report_iface_status()
 mwan3_report_connected_v4()
 {
 	$NFT list set $MWAN3_NFT_TABLE mwan3_connected_v4 2>/dev/null | \
-		awk '/elements/ { p=1; next }
-		     p && /}/ { p=0; next }
-		     p { gsub(/[{},]/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "");
-		         if ($0 != "") print "  " $0 }'
+		awk '/elements/{
+			gsub(/.*elements[^{]*\{/,""); gsub(/\}/,""); p=1
+		}
+		p {
+			gsub(/[{},]/," ")
+			for(i=1;i<=NF;i++) if($i~/[0-9]/) print "  "$i
+		}
+		/\}/{p=0}'
 }
 
 mwan3_report_policies_v4()
