@@ -17,8 +17,8 @@ _cat_file() {
 }
 
 report_connected_v4() {
-	local address
-	$NFT list set $MWAN3_NFT_TABLE mwan3_connected_v4 2>/dev/null | \
+	local address tmp
+	tmp=$($NFT list set $MWAN3_NFT_TABLE mwan3_connected_v4 2>/dev/null | \
 		awk '/elements/{
 			gsub(/.*elements[^{]*\{/,""); gsub(/\}/,""); p=1
 		}
@@ -26,14 +26,15 @@ report_connected_v4() {
 			gsub(/[{},]/," ")
 			for(i=1;i<=NF;i++) if($i~/[0-9]/) print $i
 		}
-		/\}/{p=0}' | while read address; do
-			json_add_string "" "${address}"
-		done
+		/\}/{p=0}')
+	for address in $tmp; do
+		json_add_string "" "${address}"
+	done
 }
 
 report_connected_v6() {
-	local address
-	$NFT list set $MWAN3_NFT_TABLE mwan3_connected_v6 2>/dev/null | \
+	local address tmp
+	tmp=$($NFT list set $MWAN3_NFT_TABLE mwan3_connected_v6 2>/dev/null | \
 		awk '/elements/{
 			gsub(/.*elements[^{]*\{/,""); gsub(/\}/,""); p=1
 		}
@@ -41,9 +42,10 @@ report_connected_v6() {
 			gsub(/[{},]/," ")
 			for(i=1;i<=NF;i++) if($i~/[0-9a-f:]/) print $i
 		}
-		/\}/{p=0}' | while read address; do
-			json_add_string "" "${address}"
-		done
+		/\}/{p=0}')
+	for address in $tmp; do
+		json_add_string "" "${address}"
+	done
 }
 
 report_policies_v4() {
