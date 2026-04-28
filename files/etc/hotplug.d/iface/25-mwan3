@@ -63,6 +63,7 @@ case "$ACTION" in
 		mwan3_set_policies_nft
 		mwan3_set_user_rules
 		mwan3_track "$INTERFACE"
+		mwan3_rtmon
 		mwan3_flush_conntrack "$INTERFACE" "ifup"
 
 		mwan3_unlock "hotplug" "$INTERFACE"
@@ -94,6 +95,7 @@ case "$ACTION" in
 		mwan3_update_track_iface_nft "$INTERFACE"
 		mwan3_set_policies_nft
 		mwan3_set_user_rules
+		mwan3_rtmon
 		mwan3_flush_conntrack "$INTERFACE" "connected"
 
 		mwan3_unlock "hotplug" "$INTERFACE"

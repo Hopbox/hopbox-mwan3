@@ -1152,6 +1152,18 @@ mwan3_track_clean()
 # mwan3track interface
 # ============================================================
 
+mwan3_rtmon()
+{
+	local pid
+	pid=$(pgrep -f mwan3rtmon 2>/dev/null)
+	if [ -n "$pid" ]; then
+		# Already running — signal to resync routes
+		kill -USR1 "$pid" 2>/dev/null
+	else
+		[ -x /usr/sbin/mwan3rtmon ] && /usr/sbin/mwan3rtmon &
+	fi
+}
+
 mwan3_track()
 {
 	local iface="$1" device
