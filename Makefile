@@ -77,9 +77,7 @@ define Package/hopbox-mwan3/install
 	$(INSTALL_CONF) ./files/etc/config/mwan3 $(1)/etc/config/
 
 	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
-	$(INSTALL_DATA) ./files/etc/hotplug.d/iface/15-mwan3 \
-		$(1)/etc/hotplug.d/iface/
-	$(INSTALL_DATA) ./files/etc/hotplug.d/iface/16-mwan3 \
+	$(INSTALL_DATA) ./files/etc/hotplug.d/iface/25-mwan3 \
 		$(1)/etc/hotplug.d/iface/
 	$(INSTALL_DATA) ./files/etc/hotplug.d/iface/16-mwan3-user \
 		$(1)/etc/hotplug.d/iface/

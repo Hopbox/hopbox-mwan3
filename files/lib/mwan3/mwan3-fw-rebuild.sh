@@ -18,6 +18,15 @@ SCRIPTNAME="mwan3-fw-rebuild"
 $NFT list chain $MWAN3_NFT_TABLE mwan3_prerouting 2>/dev/null | \
 	grep -q "meta mark" && exit 0
 
+# Small delay to let fw4 finish completely and mwan3track connected to fire
+# mwan3track connected handler does the full rebuild, so we only need to
+# rebuild here if mwan3track hasn't fired yet (early boot race)
+sleep 2
+
+# Re-check after delay — mwan3track connected may have already rebuilt
+$NFT list chain $MWAN3_NFT_TABLE mwan3_prerouting 2>/dev/null | \
+	grep -q "meta mark" && exit 0
+
 LOG notice "Rebuilding mwan3 rules after fw4 reload"
 
 mwan3_init

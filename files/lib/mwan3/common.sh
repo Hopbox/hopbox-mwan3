@@ -178,5 +178,5 @@ readfile() {
 }
 
 get_uptime() {
-    awk '{print int($1)}' /proc/uptime
+	awk '{print int($1)}' /proc/uptime
 }

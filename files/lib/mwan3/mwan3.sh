@@ -976,6 +976,19 @@ mwan3_report_policies_v4()
 
 _report_member_status()
 {
+	local member="$1" policy="$2"
+	local iface weight metric status
+	config_get iface "$member" interface
+	config_get weight "$member" weight 1
+	config_get metric "$member" metric 1
+	[ -z "$iface" ] && return
+	mwan3_get_iface_hotplug_state status "$iface"
+	[ "$status" = "online" ] && \
+		echo "$iface:$weight:$metric" >> "/tmp/mwan3_report_${policy}.$$"
+}
+
+_report_offline_member()
+{
 	local member="$1"
 	local iface weight metric status
 	config_get iface "$member" interface
@@ -983,20 +996,60 @@ _report_member_status()
 	config_get metric "$member" metric 1
 	[ -z "$iface" ] && return
 	mwan3_get_iface_hotplug_state status "$iface"
-	printf "  %-20s weight:%s metric:%s [%s]\n" \
-		"$iface" "$weight" "$metric" "$status"
+	[ "$status" = "online" ] || \
+		printf "  %-20s offline (metric:%s)\n" "$iface" "$metric"
 }
 
 _report_policy_v4()
 {
 	local policy="$1"
-	local chain="mwan3_policy_${policy}"
+	local last_resort
+
+	config_get last_resort "$policy" last_resort unreachable
+
 	echo "$policy:"
-	config_list_foreach "$policy" use_member _report_member_status
-	local rules
-	rules=$($NFT list chain $MWAN3_NFT_TABLE "$chain" 2>/dev/null | \
-		grep -v "^table\|^chain\|^}" | sed 's/^\s*/  /')
-	[ -n "$rules" ] && echo "$rules" || echo "  (no active rules)"
+
+	# Collect online members via tempfile
+	local members_file="/tmp/mwan3_report_${policy}.$$"
+	rm -f "$members_file"
+	config_list_foreach "$policy" use_member _report_member_status "$policy"
+
+	if [ ! -f "$members_file" ]; then
+		echo "  $last_resort"
+		echo ""
+		return
+	fi
+
+	# Find lowest metric
+	local lowest=256 m metric
+	while IFS= read -r m; do
+		metric="${m##*:}"
+		[ "$metric" -lt "$lowest" ] && lowest=$metric
+	done < "$members_file"
+
+	# Total weight at lowest metric
+	local total_weight=0 weight
+	while IFS= read -r m; do
+		metric="${m##*:}"; weight=$(echo "$m" | cut -d: -f2)
+		[ "$metric" -eq "$lowest" ] && total_weight=$((total_weight + weight))
+	done < "$members_file"
+
+	# Print active members with percentage
+	local iface pct
+	while IFS= read -r m; do
+		iface=$(echo "$m" | cut -d: -f1)
+		weight=$(echo "$m" | cut -d: -f2)
+		metric="${m##*:}"
+		if [ "$metric" -eq "$lowest" ] && [ "$total_weight" -gt 0 ]; then
+			pct=$(( weight * 100 / total_weight ))
+			printf "  %-20s %d%%\n" "$iface" "$pct"
+		fi
+	done < "$members_file"
+	rm -f "$members_file"
+
+	# Show offline members
+	config_list_foreach "$policy" use_member _report_offline_member
+
 	echo ""
 }
 
@@ -1015,8 +1068,40 @@ mwan3_report_connected_v6()
 
 mwan3_report_rules_v4()
 {
-	$NFT list chain $MWAN3_NFT_TABLE mwan3_rules 2>/dev/null | \
-		grep -v "^table\|^chain\|^}" | sed 's/^/  /'
+	config_foreach _report_rule_v4 rule
+}
+
+_report_rule_v4()
+{
+	local rule="$1"
+	local proto src_ip src_port dest_ip dest_port use_policy family
+	local ipset sticky
+
+	config_get proto "$rule" proto all
+	config_get src_ip "$rule" src_ip
+	config_get src_port "$rule" src_port
+	config_get dest_ip "$rule" dest_ip
+	config_get dest_port "$rule" dest_port
+	config_get use_policy "$rule" use_policy
+	config_get family "$rule" family any
+	config_get ipset "$rule" ipset
+	config_get sticky "$rule" sticky 0
+
+	[ -z "$use_policy" ] && return
+
+	local desc=""
+	[ "$family" != "any" ] && desc="${family} "
+	[ "$proto" != "all" ] && desc="${desc}${proto} "
+	[ -n "$src_ip" ] && desc="${desc}src:${src_ip} "
+	[ -n "$src_port" ] && desc="${desc}sport:${src_port} "
+	[ -n "$dest_ip" ] && desc="${desc}dst:${dest_ip} "
+	[ -n "$dest_port" ] && desc="${desc}dport:${dest_port} "
+	[ -n "$ipset" ] && desc="${desc}set:${ipset} "
+	[ "$sticky" = "1" ] && desc="${desc}[sticky] "
+
+	[ -z "$desc" ] && desc="all traffic "
+
+	printf "  %-30s → %s\n" "${desc% }" "$use_policy"
 }
 
 mwan3_report_rules_v6()

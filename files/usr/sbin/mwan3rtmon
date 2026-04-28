@@ -20,6 +20,7 @@ main() {
 	trap rtchange USR1
 
 	config_load mwan3
+	mwan3_init
 	config_get rtmon_interval globals rtmon_interval '5'
 
 	sleep 3
