@@ -91,7 +91,7 @@ interfaces()
 
 	echo "Interface status:"
 	config_foreach mwan3_report_iface_status interface
-	echo -e
+	echo ""
 }
 
 policies()

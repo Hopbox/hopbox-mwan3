@@ -938,28 +938,47 @@ mwan3_set_iface_hotplug_state()
 	echo "$2" > "${MWAN3_STATUS_DIR}/$1/STATUS"
 }
 
+mwan3_format_duration()
+{
+	local secs="$(($1))" days hours mins
+	days=$(( secs / 86400 ))
+	secs=$(( secs % 86400 ))
+	hours=$(( secs / 3600 ))
+	secs=$(( secs % 3600 ))
+	mins=$(( secs / 60 ))
+	secs=$(( secs % 60 ))
+	printf "%dh:%02dm:%02ds" $(( days * 24 + hours )) $mins $secs
+}
+
 mwan3_report_iface_status()
 {
 	local iface="$1" status device iface_id
+	local now ts duration tracking pid
+
 	mwan3_get_iface_hotplug_state status "$iface"
 	network_get_device device "$iface"
 	mwan3_get_iface_id iface_id "$iface"
 
-	echo "Interface $iface ($device) [id: $iface_id] is $status"
-}
+	now=$(awk '{print int($1)}' /proc/uptime)
 
-mwan3_report_policies()
-{
-	config_foreach _report_policy policy
-}
+	pid=$(cat "${MWAN3TRACK_STATUS_DIR}/${iface}/PID" 2>/dev/null)
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		tracking="tracking active"
+	else
+		tracking="tracking inactive"
+	fi
 
-_report_policy()
-{
-	local policy="$1"
-	local chain="mwan3_policy_${policy}"
-	echo "Policy $policy:"
-	$NFT list chain $MWAN3_NFT_TABLE "$chain" 2>/dev/null || \
-		echo "  (not loaded)"
+	if [ "$status" = "online" ]; then
+		ts=$(cat "${MWAN3TRACK_STATUS_DIR}/${iface}/ONLINE" 2>/dev/null)
+		[ -n "$ts" ] && duration=" $(mwan3_format_duration $(( now - ts )))" || duration=""
+		printf " interface %s (%s) [id: %s] is online%s and %s\n" \
+			"$iface" "${device:-?}" "$iface_id" "$duration" "$tracking"
+	else
+		ts=$(cat "${MWAN3TRACK_STATUS_DIR}/${iface}/OFFLINE" 2>/dev/null)
+		[ -n "$ts" ] && duration=" for $(mwan3_format_duration $(( now - ts )))" || duration=""
+		printf " interface %s (%s) [id: %s] is offline%s and %s\n" \
+			"$iface" "${device:-?}" "$iface_id" "$duration" "$tracking"
+	fi
 }
 
 mwan3_report_connected_v4()
