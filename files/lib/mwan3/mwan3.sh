@@ -990,8 +990,10 @@ mwan3_report_iface_status()
 mwan3_report_connected_v4()
 {
 	$NFT list set $MWAN3_NFT_TABLE mwan3_connected_v4 2>/dev/null | \
-		awk '/elements/{p=1} p && /[0-9]+\.[0-9]/{print}' | \
-		tr ',' '\n' | tr -d '{}' | awk '{print "  "$1}'
+		awk '/elements/ { p=1; next }
+		     p && /}/ { p=0; next }
+		     p { gsub(/[{},]/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "");
+		         if ($0 != "") print "  " $0 }'
 }
 
 mwan3_report_policies_v4()
@@ -1093,7 +1095,7 @@ mwan3_report_connected_v6()
 
 mwan3_report_rules_v4()
 {
-	config_foreach _report_rule_v4 rule
+	_MWAN3_REPORT_FAMILY="ipv4" config_foreach _report_rule_v4 rule
 }
 
 _report_rule_v4()
@@ -1114,6 +1116,11 @@ _report_rule_v4()
 
 	[ -z "$use_policy" ] && return
 
+	# Filter by reporting family context
+	# ipv4 reporter skips ipv6-only rules and vice versa
+	[ "$_MWAN3_REPORT_FAMILY" = "ipv4" ] && [ "$family" = "ipv6" ] && return
+	[ "$_MWAN3_REPORT_FAMILY" = "ipv6" ] && [ "$family" = "ipv4" ] && return
+
 	local desc=""
 	[ "$family" != "any" ] && desc="${family} "
 	[ "$proto" != "all" ] && desc="${desc}${proto} "
@@ -1131,7 +1138,8 @@ _report_rule_v4()
 
 mwan3_report_rules_v6()
 {
-	[ $NO_IPV6 -eq 0 ] && mwan3_report_rules_v4
+	[ $NO_IPV6 -eq 0 ] && \
+		_MWAN3_REPORT_FAMILY="ipv6" config_foreach _report_rule_v4 rule
 }
 
 mwan3_track_clean()
