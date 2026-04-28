@@ -7,66 +7,93 @@
 
 MWAN3TRACK_STATUS_DIR="/var/run/mwan3track"
 
-IPS="ipset"
-IPT4="iptables -t mangle -w"
-IPT6="ip6tables -t mangle -w"
+get_uptime() {
+	awk '{print int($1)}' /proc/uptime
+}
 
 report_connected_v4() {
 	local address
-
-	if [ -n "$($IPT4 -S mwan3_connected 2> /dev/null)" ]; then
-		for address in $($IPS -o save list mwan3_connected_v4 | grep add | cut -d " " -f 3); do
+	$NFT list set $MWAN3_NFT_TABLE mwan3_connected_v4 2>/dev/null | \
+		awk '/elements/ { p=1; next }
+		     p && /}/ { p=0; next }
+		     p { gsub(/[{},]/, ""); for(i=1;i<=NF;i++) if($i!="") print $i }' | \
+		while read address; do
 			json_add_string "" "${address}"
 		done
-	fi
 }
 
 report_connected_v6() {
 	local address
-
-	if [ -n "$($IPT6 -S mwan3_connected 2> /dev/null)" ]; then
-		for address in $($IPS -o save list mwan3_connected_v6 | grep add | cut -d " " -f 3); do
+	$NFT list set $MWAN3_NFT_TABLE mwan3_connected_v6 2>/dev/null | \
+		awk '/elements/ { p=1; next }
+		     p && /}/ { p=0; next }
+		     p { gsub(/[{},]/, ""); for(i=1;i<=NF;i++) if($i!="") print $i }' | \
+		while read address; do
 			json_add_string "" "${address}"
 		done
-	fi
 }
 
-report_policies() {
-	local ipt="$1"
-	local policy="$2"
+report_policies_v4() {
+	config_foreach _rpcd_report_policy policy
+}
 
-	local percent total_weight weight iface
+report_policies_v6() {
+	config_foreach _rpcd_report_policy policy
+}
 
-	total_weight=$($ipt -S $policy | grep -v '.*--comment "out .*" .*$' | cut -s -d'"' -f2 | head -1 | awk '{print $3}')
+_rpcd_member_weight() {
+	local member="$1"
+	local iface weight metric status
+	config_get iface "$member" interface
+	config_get weight "$member" weight 1
+	config_get metric "$member" metric 1
+	[ -z "$iface" ] && return
+	mwan3_get_iface_hotplug_state status "$iface"
+	[ "$status" = "online" ] || return
+	echo "$iface:$weight:$metric" >> "/tmp/mwan3_rpcd_members_$$.tmp"
+}
 
-	for iface in $($ipt -S $policy | grep -v '.*--comment "out .*" .*$' | cut -s -d'"' -f2 | awk '{print $1}'); do
-		weight=$($ipt -S $policy | grep -v '.*--comment "out .*" .*$' | cut -s -d'"' -f2 | awk '$1 == "'$iface'"' | awk '{print $2}')
-		percent=$(($weight*100/$total_weight))
+_rpcd_report_policy() {
+	local policy="$1"
+	local members_file="/tmp/mwan3_rpcd_members_$$.tmp"
+	rm -f "$members_file"
+
+	config_list_foreach "$policy" use_member _rpcd_member_weight
+
+	[ -f "$members_file" ] || return
+
+	# Find lowest metric
+	local lowest=256 m metric
+	while IFS= read -r m; do
+		metric="${m##*:}"
+		[ "$metric" -lt "$lowest" ] && lowest=$metric
+	done < "$members_file"
+
+	# Total weight at lowest metric
+	local total_weight=0 weight
+	while IFS= read -r m; do
+		metric="${m##*:}"; weight=$(echo "$m" | cut -d: -f2)
+		[ "$metric" -eq "$lowest" ] && total_weight=$((total_weight + weight))
+	done < "$members_file"
+
+	[ "$total_weight" -eq 0 ] && { rm -f "$members_file"; return; }
+
+	json_add_array "$policy"
+	local iface percent
+	while IFS= read -r m; do
+		iface=$(echo "$m" | cut -d: -f1)
+		weight=$(echo "$m" | cut -d: -f2)
+		metric="${m##*:}"
+		[ "$metric" -eq "$lowest" ] || continue
+		percent=$(( weight * 100 / total_weight ))
 		json_add_object
 		json_add_string interface "$iface"
 		json_add_int percent "$percent"
 		json_close_object
-	done
-}
+	done < "$members_file"
+	json_close_array
 
-report_policies_v4() {
-	local policy
-
-	for policy in $($IPT4 -S | awk '{print $2}' | grep mwan3_policy_ | sort -u); do
-		json_add_array "${policy##*mwan3_policy_}"
-		report_policies "$IPT4" "$policy"
-		json_close_array
-	done
-}
-
-report_policies_v6() {
-	local policy
-
-	for policy in $($IPT6 -S | awk '{print $2}' | grep mwan3_policy_ | sort -u); do
-		json_add_array "${policy##*mwan3_policy_}"
-		report_policies "$IPT6" "$policy"
-		json_close_array
-	done
+	rm -f "$members_file"
 }
 
 get_mwan3_status() {
